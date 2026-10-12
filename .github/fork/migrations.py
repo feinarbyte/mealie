@@ -15,13 +15,12 @@ This script is run by sync.sh after every merge and does three things:
 2. merge: if there is more than one head, write an empty merge migration.
 3. record: rewrite migrations.lock with the resulting history.
 
-It only reads the migration files as text (no imports), so it needs nothing but
+It only reads the migration files as text (no imports, no parsing), so it needs nothing but
 the Python standard library.
 """
 
 from __future__ import annotations
 
-import ast
 import datetime as dt
 import hashlib
 import re
@@ -66,37 +65,24 @@ class MigrationError(Exception):
     pass
 
 
-def _literal(node: ast.expr, path: Path) -> tuple[str, ...]:
-    try:
-        value = ast.literal_eval(node)
-    except ValueError as e:
-        raise MigrationError(f"{path.name}: revision identifiers must be literals") from e
-
-    if value is None:
-        return ()
-    if isinstance(value, str):
-        return (value,)
-    if isinstance(value, (tuple, list)) and all(isinstance(v, str) for v in value):
-        return tuple(value)
-    raise MigrationError(f"{path.name}: unexpected revision identifier {value!r}")
+def _read_identifier(name: str, source: str, path: Path) -> tuple[str, ...]:
+    match = re.search(rf"^{name}\b[^=\n]*=\s*(\(.*?\)|\[.*?\]|None\b|\"[^\"\n]*\"|'[^'\n]*')", source, re.M | re.S)
+    if match is None:
+        raise MigrationError(f"{path.name}: could not read {name}")
+    return tuple(a or b for a, b in re.findall(r"\"([^\"\n]+)\"|'([^'\n]+)'", match.group(1)))
 
 
 def read_migration(path: Path) -> tuple[str, tuple[str, ...]]:
-    """Returns (revision, parents) of a migration file."""
-    found: dict[str, tuple[str, ...]] = {}
-    for node in ast.parse(path.read_text(encoding="utf-8")).body:
-        if isinstance(node, ast.Assign) and len(node.targets) == 1:
-            target, value = node.targets[0], node.value
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            target, value = node.target, node.value
-        else:
-            continue
-        if isinstance(target, ast.Name) and target.id in ("revision", "down_revision"):
-            found[target.id] = _literal(value, path)
+    """Returns (revision, parents) of a migration file.
 
-    if len(found.get("revision", ())) != 1 or "down_revision" not in found:
-        raise MigrationError(f"{path.name}: could not read revision/down_revision")
-    return found["revision"][0], tuple(sorted(found["down_revision"]))
+    Parsed with regular expressions rather than `ast`: the migrations may use syntax
+    that is newer than the Python that happens to run this script.
+    """
+    source = path.read_text(encoding="utf-8")
+    revision = _read_identifier("revision", source, path)
+    if len(revision) != 1:
+        raise MigrationError(f"{path.name}: could not read revision")
+    return revision[0], tuple(sorted(_read_identifier("down_revision", source, path)))
 
 
 def read_graph() -> tuple[dict[str, tuple[str, ...]], dict[str, Path]]:
