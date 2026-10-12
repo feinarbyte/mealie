@@ -95,7 +95,7 @@ def read_graph() -> tuple[dict[str, tuple[str, ...]], dict[str, Path]]:
                 f"revision {revision} is defined twice:\n"
                 f"  {files[revision].name}\n  {path.name}\n"
                 "This usually means upstream merged one of our features with a re-dated "
-                "migration file. Keep the file that is listed in migrations.lock and delete "
+                "migration file. Keep the file that feinarbyte/main already had and delete "
                 "the other one (see .github/fork/README.md)."
             )
         graph[revision] = parents

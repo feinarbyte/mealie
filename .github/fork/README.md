@@ -84,7 +84,7 @@ now and then:
   (`git checkout origin/feinarbyte/main -- mealie/alembic/versions/<file>`,
   delete the renamed copy) and commit. The merge migration takes care of the rest.
 - *"defined twice"*: upstream merged the feature and re-dated the migration
-  file. Delete the incoming copy, keep the one named in `migrations.lock`.
+  file. Delete the incoming copy and keep the file `feinarbyte/main` already had.
   Only do this if both files make the same schema change.
 
 `tests/unit_tests/test_alembic.py` is changed in this fork accordingly: it
