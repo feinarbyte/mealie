@@ -1,0 +1,186 @@
+name: feinarbyte Build
+
+# Builds the feinarbyte flavour of Mealie: upstream mealie-next plus the feature
+# branches listed in .github/fork/branches.txt. See .github/fork/README.md.
+#
+# Every run
+#   1. merges upstream and the feature branches into a candidate commit
+#   2. runs the backend and frontend tests against the candidate
+#   3. builds and pushes ghcr.io/<owner>/mealie
+#   4. fast-forwards feinarbyte/main to the candidate
+# If any step fails nothing is published and feinarbyte/main stays untouched.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  push:
+    branches:
+      - feinarbyte/main
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build and publish even if this commit already has an image
+        type: boolean
+        default: false
+
+concurrency:
+  group: fork-build
+  cancel-in-progress: false
+
+env:
+  INTEGRATION_BRANCH: feinarbyte/main
+  CANDIDATE_BRANCH: feinarbyte/candidate
+  UPSTREAM_URL: https://github.com/mealie-recipes/mealie.git
+  UPSTREAM_BRANCH: mealie-next
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  sync:
+    name: Merge upstream and feature branches
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      sha: ${{ steps.candidate.outputs.sha }}
+      short: ${{ steps.candidate.outputs.short }}
+      build: ${{ steps.candidate.outputs.build }}
+    steps:
+      - name: Check out ${{ env.INTEGRATION_BRANCH }}
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.INTEGRATION_BRANCH }}
+          fetch-depth: 0
+          # A deploy key instead of GITHUB_TOKEN: merging upstream regularly touches
+          # .github/workflows, which GITHUB_TOKEN is never allowed to push.
+          ssh-key: ${{ secrets.FORK_SYNC_SSH_KEY }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fast-forward the ${{ env.UPSTREAM_BRANCH }} mirror
+        run: |
+          git fetch --no-tags "$UPSTREAM_URL" "$UPSTREAM_BRANCH"
+          git push origin "FETCH_HEAD:refs/heads/$UPSTREAM_BRANCH" \
+            || echo "::warning::could not fast-forward origin/$UPSTREAM_BRANCH, it has diverged from upstream"
+
+      - name: Merge upstream and feature branches
+        run: .github/fork/sync.sh
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push candidate
+        id: candidate
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          sha="$(git rev-parse HEAD)"
+          short="$(git rev-parse --short=9 HEAD)"
+          git push --force origin "HEAD:refs/heads/$CANDIDATE_BRANCH"
+
+          # Nothing new since the last published build: the candidate is the commit that was
+          # promoted back then, and its image already exists.
+          build=true
+          if [ "$FORCE" != "true" ] && docker manifest inspect "$IMAGE:sha-$short" > /dev/null 2>&1; then
+            build=false
+            echo "::notice::$IMAGE:sha-$short is already published, nothing to do"
+          fi
+
+          {
+            echo "sha=$sha"
+            echo "short=$short"
+            echo "build=$build"
+          } >> "$GITHUB_OUTPUT"
+
+  backend-tests:
+    name: Backend Server Tests
+    needs: sync
+    if: needs.sync.outputs.build == 'true'
+    uses: ./.github/workflows/test-backend.yml
+    with:
+      ref: ${{ needs.sync.outputs.sha }}
+
+  frontend-tests:
+    name: Frontend Tests
+    needs: sync
+    if: needs.sync.outputs.build == 'true'
+    uses: ./.github/workflows/test-frontend.yml
+    with:
+      ref: ${{ needs.sync.outputs.sha }}
+
+  publish:
+    name: Build and publish image
+    needs:
+      - sync
+      - backend-tests
+      - frontend-tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.sync.outputs.sha }}
+          ssh-key: ${{ secrets.FORK_SYNC_SSH_KEY }}
+
+      - name: Check the Alembic history
+        run: python3 .github/fork/migrations.py check
+
+      # Same as upstream's nightly: "nightly" keeps the admin page from reporting an
+      # outdated version. The exact commit is shown through the COMMIT build arg.
+      - name: Override __init__.py
+        run: echo '__version__ = "nightly"' > ./mealie/__init__.py
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        if: contains(vars.FORK_PLATFORMS, 'arm')
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Compute tags
+        id: tags
+        run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          file: ./docker/Dockerfile
+          context: .
+          # Set the repository variable FORK_PLATFORMS to e.g. "linux/amd64,linux/arm64"
+          # to build for more than amd64. arm64 is emulated and takes considerably longer.
+          platforms: ${{ vars.FORK_PLATFORMS || 'linux/amd64' }}
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:sha-${{ needs.sync.outputs.short }}
+            ${{ env.IMAGE }}:${{ steps.tags.outputs.date }}-${{ needs.sync.outputs.short }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.sync.outputs.sha }}
+            org.opencontainers.image.version=nightly-${{ steps.tags.outputs.date }}-${{ needs.sync.outputs.short }}
+          build-args: |
+            COMMIT=${{ needs.sync.outputs.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Only now does the candidate become feinarbyte/main, so the branch always
+      # points at a commit that passed the tests and has an image.
+      - name: Promote candidate to ${{ env.INTEGRATION_BRANCH }}
+        run: git push origin "${{ needs.sync.outputs.sha }}:refs/heads/$INTEGRATION_BRANCH"

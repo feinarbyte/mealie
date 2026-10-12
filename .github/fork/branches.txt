@@ -1,0 +1,9 @@
+# Feature branches that are merged into the feinarbyte build.
+# One branch name per line, as it exists on origin (feinarbyte/mealie).
+# Lines starting with # and blank lines are ignored.
+#
+# Removing a line does not remove the feature: it only stops new commits from
+# being picked up. To drop a feature, revert its merge commit(s) on
+# feinarbyte/main as well (see README.md in this directory).
+
+feat/meal-plan-scale
