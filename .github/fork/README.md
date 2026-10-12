@@ -31,6 +31,21 @@ The workflow pushes with the deploy key in the `FORK_SYNC_SSH_KEY` secret,
 because `GITHUB_TOKEN` may not push changes to workflow files, which upstream
 merges contain regularly.
 
+## Setup
+
+Needed once per repository. Create a deploy key with write access and store
+its private half as the `FORK_SYNC_SSH_KEY` Actions secret:
+
+```bash
+ssh-keygen -t ed25519 -N "" -C "fork-build workflow" -f /tmp/fork-build-key
+gh repo deploy-key add /tmp/fork-build-key.pub --repo feinarbyte/mealie --allow-write --title "fork-build workflow"
+gh secret set FORK_SYNC_SSH_KEY --repo feinarbyte/mealie < /tmp/fork-build-key
+rm /tmp/fork-build-key /tmp/fork-build-key.pub
+```
+
+Optional: set the repository variable `FORK_PLATFORMS` (for example
+`linux/amd64,linux/arm64`) to build for more than amd64.
+
 ## Everyday tasks
 
 **Add a feature.** Branch from `mealie-next`, push to this repository, add the

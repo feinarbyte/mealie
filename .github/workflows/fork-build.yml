@@ -46,6 +46,15 @@ jobs:
       short: ${{ steps.candidate.outputs.short }}
       build: ${{ steps.candidate.outputs.build }}
     steps:
+      - name: Require the deploy key
+        env:
+          HAS_KEY: ${{ secrets.FORK_SYNC_SSH_KEY != '' }}
+        run: |
+          if [ "$HAS_KEY" != "true" ]; then
+            echo "::error::Secret FORK_SYNC_SSH_KEY is missing. See .github/fork/README.md, section Setup."
+            exit 1
+          fi
+
       - name: Check out ${{ env.INTEGRATION_BRANCH }}
         uses: actions/checkout@v6
         with:
